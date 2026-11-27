@@ -59,6 +59,9 @@ label input,label select,label textarea{margin-top:3px;font-weight:400}
 header{position:relative}header h1{padding-right:96px}header.lk{padding-right:16px}
 .lock{max-width:460px;margin:10px auto}.lock .big{width:100%;min-height:54px;margin-top:8px}
 .rc{font:800 26px/1.2 ui-monospace,monospace;letter-spacing:2px;text-align:center;background:#fff1c9;border-radius:10px;padding:12px;margin:8px 0}
+.st{display:inline-block;font-size:12px;font-weight:700;padding:2px 9px;border-radius:99px;background:#fde3e3;color:#8a1c1c;white-space:nowrap}
+.stc{border-left:5px solid #d64545}.stc li{align-items:flex-start}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}.chips label{margin:0;display:flex;align-items:center;gap:6px;font-weight:600;color:var(--ink);background:var(--soft);border-radius:99px;padding:6px 12px}.chips input{width:auto;min-height:0;margin:0}
 .qr{display:inline-block;background:#fff;padding:8px;border-radius:10px}
 </style>
 </head>
@@ -12558,6 +12561,8 @@ function cloudInit(){
     USER=u;ADMIN=!!u&&(u.email||'').toLowerCase()===ADMIN_EMAIL;
     if(u&&!ADMIN){auth.signOut();toast('Hindi admin ang account na ito')}
     if(unReq){unReq();unReq=null;REQS=[]}
+    if(unStv){unStv();unStv=null;STV={}}
+    if(ADMIN)unStv=db.collection('status_priv').onSnapshot(q=>{if(!ADMIN)return;STV={};q.docs.forEach(d=>{STV[d.id]={...d.data(),pid:d.id,priv:1}});softRender()},()=>{});
     if(ADMIN)unReq=db.collection('requests').orderBy('at').onSnapshot(q=>{REQS=q.docs.map(d=>({id:d.id,...d.data()}));softRender()},()=>{});
     render();
   });
@@ -12570,6 +12575,26 @@ function cloudInit(){
   },err);
   db.doc('data/meta').onSnapshot(s=>{if(!s.exists)return;const m=s.data();D.anns=merge(D.anns,m.anns||[]);D.lgs=merge(D.lgs,m.lgs||[]);D.cfg={...D.cfg,...(m.cfg||{})};D.seq=Math.max(D.seq||0,m.seq||0);LAST.meta=JSON.stringify(metaOf());cache();softRender()},err);
   db.collection('sessions').onSnapshot(q=>{SQ=q;if(CLOUD_HAS===true){applyS();cache();softRender()}},err);
+  db.collection('status').onSnapshot(q=>{STP={};q.docs.forEach(d=>{STP[d.id]={...d.data(),pid:d.id}});softRender()},()=>{});
+}
+let STP={},STV={},unStv=null;
+const STC=['🤒 May sakit','🏥 Nasa ospital','🙏 Prayer request','🕊️ Namatayan','✈️ Nasa malayo','💬 Iba pa'];
+const STMAX=30*864e5;
+function stOf(pid){const a=[STP[pid],STV[pid]].filter(s=>s&&s.active&&Date.now()-s.at<STMAX).sort((x,y)=>y.at-x.at);return a[0]||null}
+const ago=t=>{const d=Math.floor((Date.now()-t)/864e5);return d<=0?'ngayon':d===1?'kahapon':d+' araw na'};
+function stList(){const ids=new Set([...Object.keys(STP),...Object.keys(STV)]);return [...ids].map(stOf).filter(Boolean).sort((a,b)=>b.at-a.at)}
+function stCard(){
+  const L=stList();if(!L.length)return '';
+  return `<div class="card stc"><h3>🙏 Ipanalangin natin (${L.length})</h3><ul class="list">${L.map(s=>{const p=D.people.find(x=>x.id===s.pid);return `<li><div class="sp"><div class="nm">${esc(p?p.name:s.name)} <span class="st">${esc(s.cat)}</span>${s.priv?' <span class="pill">🔒 Admin lang</span>':''}</div>${s.note?`<div>${esc(s.note)}</div>`:''}<div class="sub">${esc(ago(s.at))}${p&&p.barangay?' · '+esc(p.barangay):''}</div></div>${ADMIN?`<button data-stdel="${esc(s.pid)}" data-priv="${s.priv?1:''}">Alisin</button>`:''}</li>`}).join('')}</ul></div>`;
+}
+function stPost(pid,data){
+  if(!CLOUD)return toast('Kailangan ng internet');
+  const p=D.people.find(x=>x.id===pid);if(!p)return;
+  const doc={pid,name:p.name,cat:data.cat||'',note:String(data.note||'').slice(0,300),at:Date.now(),active:!!data.cat};
+  const pub=data.vis!=='priv',off={...doc,cat:'',note:'',active:false},fail=e=>toast('Hindi naipadala: '+e.message);
+  if(!doc.active){db.doc('status/'+pid).set(off).catch(fail);db.doc('status_priv/'+pid).set(off).catch(fail);return}
+  db.doc((pub?'status/':'status_priv/')+pid).set(doc).catch(fail);
+  db.doc((pub?'status_priv/':'status/')+pid).set(off).catch(()=>{});
 }
 const FL={nickname:'Nickname',phone:'Contact',birthday:'Birthday',civilStatus:'Civil status',street:'Street',barangay:'Barangay',town:'Town'};
 function reqCard(){
@@ -12605,7 +12630,8 @@ function vDash(){
 }
 function personRow(p){
   const sub=[p.nickname?'“'+p.nickname+'”':'',p.birthday?fmt(p.birthday)+(age(p.birthday)!==''?' ('+age(p.birthday)+')':''):'Walang birthday',p.civilStatus,p.street,p.lifegroup?'LG: '+lgName(p.lifegroup):''].filter(Boolean).join(' · ');
-  return `<li data-edit="${esc(p.id)}"><div class="sp"><div class="nm">${esc(p.name)}</div><div class="sub">${esc(sub)}</div></div></li>`;
+  const s=stOf(p.id);
+  return `<li data-edit="${esc(p.id)}"><div class="sp"><div class="nm">${esc(p.name)}${s?` <span class="st">${esc(s.cat)}</span>`:''}</div>${s&&s.note?`<div class="sub" style="color:#8a1c1c">${esc(s.note)}</div>`:''}<div class="sub">${esc(sub)}</div></div></li>`;
 }
 function vMembers(){
   const q=S.q.toLowerCase();
@@ -12705,6 +12731,12 @@ function vSelf(){
   ${inp('street','Street / House no.',p.street)}${inp('barangay','Barangay',p.barangay,'text','list="brl"')}${inp('town','Town',p.town,'text','list="twl"')}</div>
   <datalist id="brl">${brgys.map(b=>`<option value="${esc(b)}">`).join('')}</datalist><datalist id="twl">${towns.map(t=>`<option value="${esc(t)}">`).join('')}</datalist>
   <button class="pri big">${ADMIN?'I-save':'Ipadala para i-approve'}</button><button type="button" class="big" data-act="selfdone">Tapos na / Logout</button></form>
+  <form id="stf" style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px"><h3>Kalagayan ko / Prayer request</h3>
+  ${(()=>{const s=stOf(p.id);return s?`<div class="ban late">Naka-post: <b>${esc(s.cat)}</b>${s.note?' · '+esc(s.note):''} <span class="sub">(${esc(ago(s.at))})</span></div><button type="button" class="big" data-stok="${esc(p.id)}">✅ Okay na ako, alisin na</button>`:'<p class="sub">Ipaalam sa church kung may pinagdadaanan ka, para maipanalangin at mabisita ka.</p>'})()}
+  <div class="chips">${STC.map((c,i)=>`<label><input type="radio" name="cat" value="${esc(c)}" ${i===0?'required':''}>${esc(c)}</label>`).join('')}</div>
+  <label>Kuwento o detalye (optional)<textarea name="note" maxlength="300" placeholder="Hal. Na-confine sa ospital, pakisama sa panalangin"></textarea></label>
+  <label>Sino ang makakakita<select name="vis"><option value="all">Lahat ng members</option><option value="priv">Admin / pastor lang</option></select></label>
+  <button class="pri big">I-post</button></form>
   <p class="sub" style="text-align:center">Kusang magla-logout pagkatapos ng 3 minutong walang galaw.</p></div>`;
 }
 function roLock(){const m=$('#main');
@@ -12712,7 +12744,7 @@ function roLock(){const m=$('#main');
   m.querySelectorAll('[data-promote],[data-editlg],[data-lgadd],[data-lgsess]').forEach(b=>b.remove());
   m.querySelectorAll('[data-mark],select[data-fu]').forEach(b=>b.disabled=true);
 }
-const VIEWS={me:()=>ME?vSelf():vLock(),dashboard:()=>reqCard()+vDash(),members:vMembers,visitors:vVisitors,lifegroups:vLifegroups,attendance:vAttendance,anniversaries:vAnn,missing:vMissing,setup:vSetup};
+const VIEWS={me:()=>ME?vSelf():vLock(),dashboard:()=>reqCard()+stCard()+vDash(),members:vMembers,visitors:vVisitors,lifegroups:vLifegroups,attendance:vAttendance,anniversaries:vAnn,missing:vMissing,setup:vSetup};
 const view=()=>{const v=location.hash.slice(1);return VIEWS[v]?v:'dashboard'};
 function render(){
   $('#lockbtn').hidden=false;$('#lockbtn').textContent=ADMIN?'🔒 Logout':'🔑 Admin';$('#navsetup').hidden=!ADMIN;
@@ -12840,6 +12872,8 @@ document.addEventListener('click',e=>{
   const t=e.target.closest('button,[data-edit],[data-open],[data-ann]');if(!t)return;const d=t.dataset;
   if(d.act==='mclose')return $('#modal').innerHTML='';
   if(d.act==='camclose')return closeCam();
+  if(d.stok){stPost(d.stok,{cat:''});return meEnd('Salamat sa Diyos! Inalis na ang kalagayan mo.')}
+  if(d.stdel&&ADMIN){db.doc((d.priv?'status_priv/':'status/')+d.stdel).delete();return toast('Inalis')}
   if(!ADMIN){
     if(d.act==='selfcam')return openCam(selfHit,'Itapat ang QR ng I.D. mo sa loob ng kahon');
     if(d.act==='selfup')return $('#sqf').click();
@@ -12890,7 +12924,8 @@ document.addEventListener('change',e=>{
 const confirm2=b=>{if(b.dataset.sure)return true;b.dataset.sure=1;b.textContent='Tap ulit para ituloy';return false};
 document.addEventListener('submit',e=>{
   const id=e.target.id,d=Object.fromEntries(new FormData(e.target));
-  if(id==='lgf'||id==='sf')e.preventDefault();
+  if(id==='lgf'||id==='sf'||id==='stf')e.preventDefault();
+  if(id==='stf'){if(!ME)return;stPost(ME,d);return meEnd(d.vis==='priv'?'Naipadala sa admin at pastor. Ipapanalangin ka namin!':'Na-post na. Ipapanalangin ka ng church family!')}
   if(id==='lgf'){const b=e.target.querySelector('button');b.disabled=true;b.textContent='Nagla-login…';auth.signInWithEmailAndPassword(String(d.em).trim(),d.pw).then(()=>{location.hash='dashboard'}).catch(er=>{b.disabled=false;b.textContent='Login';toast(/password|credential/i.test(er.code||'')?'Mali ang email o password':er.message)});return}
   if(id==='sf'){const p=D.people.find(x=>x.id===ME);if(!p)return meEnd();const ch={};Object.keys(FL).forEach(k=>{const v=String(d[k]??'').trim();if(v!==(p[k]||''))ch[k]=v});
     if(!Object.keys(ch).length)return meEnd('Walang binago.');
