@@ -12536,7 +12536,8 @@ const metaOf=()=>{const c={...D.cfg};['pw','ps','rc','rs'].forEach(k=>delete c[k
 function merge(old,nw){const m=new Map((old||[]).map(o=>[o.id,o]));return nw.map(n=>{const o=m.get(n.id);if(o){for(const k in o)delete o[k];return Object.assign(o,n)}return n})}
 function setSync(t){const e=$('#sync');if(e)e.textContent='Church Monitoring · '+t}
 function push(all){
-  if(!CLOUD||!ADMIN||(!all&&CLOUD_HAS!==true))return;
+  if(!CLOUD||(!ADMIN&&!USHER)||(!all&&CLOUD_HAS!==true))return;
+  if(!ADMIN){const ops=[];D.sessions.forEach(s=>{const j=JSON.stringify(s);if(LAST.s[s.id]!==j){ops.push(j);LAST.s[s.id]=j;db.doc('sessions/'+s.id).set(JSON.parse(j)).catch(e=>toast('Hindi ma-save: '+e.message))}});return ops.length}
   const ops=[],pj=JSON.stringify(D.people),mj=JSON.stringify(metaOf());
   if(all||pj!==LAST.people){ops.push(b=>b.set(db.doc('data/people'),{list:JSON.parse(pj)}));LAST.people=pj}
   if(all||mj!==LAST.meta){ops.push(b=>b.set(db.doc('data/meta'),JSON.parse(mj)));LAST.meta=mj}
@@ -12558,8 +12559,13 @@ function cloudInit(){
   try{db.enablePersistence().catch(()=>{})}catch(e){}
   const err=e=>setSync('error: '+e.message);
   auth.onAuthStateChanged(u=>{
-    USER=u;ADMIN=!!u&&(u.email||'').toLowerCase()===ADMIN_EMAIL;
-    if(u&&!ADMIN){auth.signOut();toast('Hindi admin ang account na ito')}
+    USER=u;ADMIN=!!u&&!u.isAnonymous&&(u.email||'').toLowerCase()===ADMIN_EMAIL;
+    if(!u||!u.isAnonymous){USHER=null;if(unUsh){unUsh();unUsh=null}}
+    if(u&&u.isAnonymous&&!USHER&&!ULOGIN)usherResume(u);
+    if(u&&!u.isAnonymous&&!ADMIN){auth.signOut();toast('Hindi admin ang account na ito')}
+    if(ADMIN&&CLOUD_HAS===true&&Object.keys(VIS).length){applyVis();save()}
+    if(unUL){unUL();unUL=null;USHERS=[]}
+    if(ADMIN)unUL=db.collection('ushers').onSnapshot(q=>{USHERS=q.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.active).sort((a,b)=>a.name.localeCompare(b.name));softRender()},()=>{});
     if(unReq){unReq();unReq=null;REQS=[]}
     if(unStv){unStv();unStv=null;STV={}}
     if(ADMIN)unStv=db.collection('status_priv').onSnapshot(q=>{if(!ADMIN)return;STV={};q.docs.forEach(d=>{STV[d.id]={...d.data(),pid:d.id,priv:1}});softRender()},()=>{});
@@ -12570,14 +12576,51 @@ function cloudInit(){
     setSync(s.metadata.fromCache?'offline · makikita ang huling na-sync':'online · naka-sync');
     if(s.metadata.fromCache&&!s.exists)return;
     CLOUD_HAS=s.exists;if(!s.exists)return render();
-    D.people=merge(D.people,s.data().list||[]);D.people.forEach(p=>{if(!p.kind)p.kind='member'});LAST.people=JSON.stringify(D.people);
+    const srv=s.data().list||[];D.people=merge(D.people,srv);D.people.forEach(p=>{if(!p.kind)p.kind='member'});LAST.people=JSON.stringify(D.people);applyVis();
+    if(ADMIN&&!s.metadata.hasPendingWrites)Object.keys(VIS).forEach(id=>{if(srv.some(p=>p.id===id))db.doc('vis/'+id).delete().catch(()=>{})});
     applyS();cache();softRender();
   },err);
   db.doc('data/meta').onSnapshot(s=>{if(!s.exists)return;const m=s.data();D.anns=merge(D.anns,m.anns||[]);D.lgs=merge(D.lgs,m.lgs||[]);D.cfg={...D.cfg,...(m.cfg||{})};D.seq=Math.max(D.seq||0,m.seq||0);LAST.meta=JSON.stringify(metaOf());cache();softRender()},err);
   db.collection('sessions').onSnapshot(q=>{SQ=q;if(CLOUD_HAS===true){applyS();cache();softRender()}},err);
+  db.collection('vis').onSnapshot(q=>{VIS={};q.docs.forEach(d=>{VIS[d.id]={...d.data(),id:d.id}});if(CLOUD_HAS!==true)return;applyVis();if(ADMIN)save();cache();softRender()},()=>{});
   db.collection('status').onSnapshot(q=>{STP={};q.docs.forEach(d=>{STP[d.id]={...d.data(),pid:d.id}});softRender()},()=>{});
 }
 let STP={},STV={},unStv=null;
+let ULOGIN=false,USHER=null,unUsh=null,USHERS=[],unUL=null,VIS={};
+const UACT=['close','newsess','cam','upload','quickvis','addvis','restA','mclose','camclose','lock'];
+const newCode=()=>{const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let c='';for(let i=0;i<6;i++)c+=a[Math.floor(Math.random()*a.length)];return c};
+async function usherLogin(code){
+  code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  if(code.length!==6)return toast('6 na letra/numero ang usher code');
+  ULOGIN=true;
+  try{
+    if(!auth.currentUser||!auth.currentUser.isAnonymous)await auth.signInAnonymously();
+    const u=await db.doc('ushers/'+code).get();
+    if(!u.exists||!u.data().active){await auth.signOut();return toast('Mali o hindi na active ang code')}
+    await db.doc('usherSessions/'+auth.currentUser.uid).set({pin:code,at:Date.now()});
+    usherWatch(code);location.hash='attendance';toast('Usher mode: '+u.data().name);
+  }catch(e){toast('Hindi maka-login: '+(e.code==='auth/operation-not-allowed'?'i-enable ang Anonymous sign-in sa Firebase':e.message))}
+  finally{ULOGIN=false}
+}
+function usherWatch(code){
+  if(unUsh)unUsh();
+  unUsh=db.doc('ushers/'+code).onSnapshot(s=>{
+    if(!s.exists||!s.data().active){USHER=null;if(unUsh){unUsh();unUsh=null}auth.signOut();toast('Inalis na ang usher access mo');render();return}
+    USHER={code,name:s.data().name};render();
+  },()=>{USHER=null;render()});
+}
+async function usherResume(u){
+  try{const s=await db.doc('usherSessions/'+u.uid).get();if(s.exists)return usherWatch(s.data().pin)}catch(e){}
+  auth.signOut();
+}
+function applyVis(){Object.values(VIS).forEach(v=>{if(!D.people.some(p=>p.id===v.id))D.people.push({...v})})}
+function usherCard(){
+  if(!ADMIN)return '';
+  return `<div class="card"><h3>Ushers (${USHERS.length}/10)</h3><p class="sub">Ang usher ay makakapag-scan ng attendance at makakapagdagdag ng visitors gamit ang code nila. Pwede mong alisin o palitan anytime.</p>
+  ${USHERS.length?`<ul class="list">${USHERS.map(u=>`<li><div class="sp"><div class="nm">${esc(u.name)}</div><div class="sub">Code: <b style="font-size:17px;letter-spacing:2px">${esc(u.id)}</b></div></div><button data-unew="${esc(u.id)}">Bagong code</button><button class="danger" data-udel="${esc(u.id)}">Alisin</button></li>`).join('')}</ul>`:'<div class="empty">Wala pang usher.</div>'}
+  ${USHERS.length<10?`<form id="uf" class="row" style="margin-top:8px"><input name="name" placeholder="Pangalan ng usher" required style="flex:1"><button class="pri">Idagdag</button></form>`:''}</div>`;
+}
+
 const STC=['🤒 May sakit','🏥 Nasa ospital','🙏 Prayer request','🕊️ Namatayan','✈️ Nasa malayo','💬 Iba pa'];
 const STMAX=30*864e5;
 function stOf(pid){const a=[STP[pid],STV[pid]].filter(s=>s&&s.active&&Date.now()-s.at<STMAX).sort((x,y)=>y.at-x.at);return a[0]||null}
@@ -12714,12 +12757,13 @@ function vSetup(){
   <div class="card"><h3>Backup at export</h3><p class="sub">Naka-save lang sa phone na ito ang data. Mag-backup lingguhan; mapupunta sa Download/GFWCGM.</p>
   <div class="row"><button data-act="backup">Backup (.json)</button><button data-act="csv">Export members (CSV)</button><button data-act="acsv">Export attendance (CSV)</button></div>
   <div class="row" style="margin-top:8px"><button data-act="restore">Restore mula sa backup</button></div></div>
-  <div class="card"><h3>Cloud (Firebase)</h3><p class="sub">Naka-login: ${esc(USER&&USER.email)} · ${CLOUD_HAS?'may data na sa cloud':'wala pang data sa cloud'}</p><div class="row"><button data-act="pushall">I-upload ulit ang lahat sa cloud</button><button data-act="lock">Logout</button></div></div>`;
+  ${usherCard()}<div class="card"><h3>Cloud (Firebase)</h3><p class="sub">Naka-login: ${esc(USER&&USER.email)} · ${CLOUD_HAS?'may data na sa cloud':'wala pang data sa cloud'}</p><div class="row"><button data-act="pushall">I-upload ulit ang lahat sa cloud</button><button data-act="lock">Logout</button></div></div>`;
 }
 function vLock(){
   const k=S.lk||{};
   return `<div class="card lock"><h2>Member: i-edit ang profile ko</h2><p class="sub">I-scan ang QR ng iyong GFWCGM I.D. Ang babaguhin mo ay ipapadala muna sa admin para i-approve.</p>
   <button class="pri big" data-act="selfcam">📷 I-scan ang QR ko</button><button class="big" data-act="selfup">🖼️ Mag-upload ng picture ng I.D.</button>${k.err?`<div class="ban err">${esc(k.err)}</div>`:''}</div>
+  ${ADMIN?'':`<div class="card lock"><h3>Usher</h3>${USHER?`<p class="sub">Naka-login bilang usher: <b>${esc(USHER.name)}</b>.</p><button class="big" data-act="lock">Logout</button>`:CLOUD?`<form id="ulf"><label>Usher code<input name="code" required maxlength="8" autocapitalize="characters" placeholder="Hal. K7M2QX"></label><button class="pri big">Login bilang usher</button></form>`:''}</div>`}
   <div class="card lock"><h3>Admin</h3>${ADMIN?`<p class="sub">Naka-login ka bilang ${esc(USER&&USER.email)}.</p><button class="big" data-act="lock">Logout</button>`:CLOUD?`<form id="lgf"><label>Email<input name="em" type="email" value="${esc(ADMIN_EMAIL)}" required autocomplete="username"></label><label>Password<input name="pw" type="password" required autocomplete="current-password"></label><button class="pri big">Login</button></form><button class="big" data-act="forgot" style="border:0;color:var(--mute);font-weight:600">Nakalimutan ang password?</button>`:'<p class="sub">Hindi ma-load ang Firebase.</p>'}</div>`;
 }
 function vSelf(){
@@ -12740,18 +12784,18 @@ function vSelf(){
   <p class="sub" style="text-align:center">Kusang magla-logout pagkatapos ng 3 minutong walang galaw.</p></div>`;
 }
 function roLock(){const m=$('#main');
-  m.querySelectorAll('[data-act]').forEach(b=>{if(b.dataset.act!=='close')b.remove()});
+  m.querySelectorAll('[data-act]').forEach(b=>{if(b.dataset.act!=='close'&&!(USHER&&UACT.includes(b.dataset.act)))b.remove()});
   m.querySelectorAll('[data-promote],[data-editlg],[data-lgadd],[data-lgsess]').forEach(b=>b.remove());
-  m.querySelectorAll('[data-mark],select[data-fu]').forEach(b=>b.disabled=true);
+  m.querySelectorAll(USHER?'select[data-fu]':'[data-mark],select[data-fu]').forEach(b=>b.disabled=true);
 }
 const VIEWS={me:()=>ME?vSelf():vLock(),dashboard:()=>reqCard()+stCard()+vDash(),members:vMembers,visitors:vVisitors,lifegroups:vLifegroups,attendance:vAttendance,anniversaries:vAnn,missing:vMissing,setup:vSetup};
 const view=()=>{const v=location.hash.slice(1);return VIEWS[v]?v:'dashboard'};
 function render(){
-  $('#lockbtn').hidden=false;$('#lockbtn').textContent=ADMIN?'🔒 Logout':'🔑 Admin';$('#navsetup').hidden=!ADMIN;
+  $('#lockbtn').hidden=false;$('#lockbtn').textContent=ADMIN||USHER?'🔒 Logout':'🔑 Admin';$('#navsetup').hidden=!ADMIN;
   const v=view();
   if(v==='setup'&&!ADMIN){location.hash='me';return}document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+v));
   const f=document.activeElement,fid=f&&f.id,pos=f&&f.selectionStart;
-  $('#main').innerHTML=(v==='me'||ADMIN?'':'<div class="ro">View only · Para i-edit ang sarili mong info, pumunta sa <b>Profile ko</b> at i-scan ang QR mo.</div>')+VIEWS[v]();
+  $('#main').innerHTML=(v==='me'||ADMIN?'':USHER?`<div class="ro">Usher mode · ${esc(USHER.name)} · Attendance at visitors lang ang pwede mong baguhin.</div>`:'<div class="ro">View only · Para i-edit ang sarili mong info, pumunta sa <b>Profile ko</b> at i-scan ang QR mo.</div>')+VIEWS[v]();
   if(!ADMIN&&v!=='me')roLock();
   if(fid==='q'||fid==='aq'){const e=$('#'+fid);if(e){e.focus();try{e.setSelectionRange(pos,pos)}catch(_){}}}
 }
@@ -12780,6 +12824,7 @@ function personForm(p,kind,after){
   <datalist id="brl">${brgys.map(b=>`<option value="${esc(b)}">`).join('')}</datalist><datalist id="twl">${towns.map(t=>`<option value="${esc(t)}">`).join('')}</datalist>`;
   const extra=p.id?`<div style="text-align:center;margin-bottom:10px"><div class="qr">${qrSvg('GFWC:'+p.id,5)}</div><div class="sub">QR ID ${esc(p.id.toUpperCase())}</div></div>`:'';
   modal(isNew?(isV?'Add visitor':'Add member'):(isV?'Edit visitor':'Edit member'),body,d=>{
+    if(isNew&&!ADMIN&&USHER){d.kind='visitor';delete d.lifegroup;const id='v'+Date.now().toString(36);const np={id,...d,addedBy:USHER.name};D.people.push(np);db.doc('vis/'+id).set(np).catch(e=>toast('Hindi ma-save: '+e.message));if(after)after(np);return}
     if(isNew){const pre=d.kind==='visitor'?'v':'m';D.seq=(D.seq||D.people.length)+1;let id=pre+String(D.seq).padStart(3,'0');while(D.people.some(x=>x.id===id)){D.seq++;id=pre+String(D.seq).padStart(3,'0')}
       const np={id,...d};D.people.push(np);if(after)after(np)}
     else{if(p.kind==='visitor'&&d.kind==='member'&&!p.memberSince)d.memberSince=today();Object.assign(p,d)}},
@@ -12874,7 +12919,8 @@ document.addEventListener('click',e=>{
   if(d.act==='camclose')return closeCam();
   if(d.stok){stPost(d.stok,{cat:''});return meEnd('Salamat sa Diyos! Inalis na ang kalagayan mo.')}
   if(d.stdel&&ADMIN){db.doc((d.priv?'status_priv/':'status/')+d.stdel).delete();return toast('Inalis')}
-  if(!ADMIN){
+  const uOK=USHER&&!ADMIN&&(d.mark||d.open||UACT.includes(d.act));
+  if(!ADMIN&&!uOK){
     if(d.act==='selfcam')return openCam(selfHit,'Itapat ang QR ng I.D. mo sa loob ng kahon');
     if(d.act==='selfup')return $('#sqf').click();
     if(d.act==='selfdone')return meEnd('Salamat! Na-logout ka na.');
@@ -12884,7 +12930,9 @@ document.addEventListener('click',e=>{
     if(d.act==='close'){S.cur=null;S.last=null;return render()}
     return;
   }
-  if(d.act==='lock'){S.lk=null;$('#modal').innerHTML='';auth.signOut().then(()=>{location.hash='';toast('Na-logout')});return}
+  if(d.udel&&ADMIN){if(!confirm2(t))return;db.doc('ushers/'+d.udel).delete();return toast('Inalis ang usher')}
+  if(d.unew&&ADMIN){if(!confirm2(t))return;const u=USHERS.find(x=>x.id===d.unew);const c=newCode();db.doc('ushers/'+c).set({name:u.name,active:true,at:Date.now()}).then(()=>db.doc('ushers/'+d.unew).delete());return toast('Bagong code para kay '+u.name+': '+c)}
+  if(d.act==='lock'){S.lk=null;$('#modal').innerHTML='';if(unUsh){unUsh();unUsh=null}USHER=null;auth.signOut().then(()=>{location.hash='';toast('Na-logout')});return}
   if(d.act==='pushall'){if(!confirm2(t))return;const n=push(true);CLOUD_HAS=true;toast('Ina-upload sa cloud ('+n+' records)…');return render()}
   if(d.rok){const r=REQS.find(x=>x.id===d.rok);if(!r)return;const p=D.people.find(x=>x.id===r.pid);if(p){Object.entries(r.changes||{}).forEach(([k,v])=>{if(!FL[k])return;if(v)p[k]=v;else delete p[k]});p.selfUpdated=today();save()}db.doc('requests/'+r.id).delete();return toast('Na-approve: '+r.name)}
   if(d.rno){db.doc('requests/'+d.rno).delete();return toast('Ni-reject')}
@@ -12924,7 +12972,9 @@ document.addEventListener('change',e=>{
 const confirm2=b=>{if(b.dataset.sure)return true;b.dataset.sure=1;b.textContent='Tap ulit para ituloy';return false};
 document.addEventListener('submit',e=>{
   const id=e.target.id,d=Object.fromEntries(new FormData(e.target));
-  if(id==='lgf'||id==='sf'||id==='stf')e.preventDefault();
+  if(id==='lgf'||id==='sf'||id==='stf'||id==='ulf'||id==='uf')e.preventDefault();
+  if(id==='ulf'){if(!CLOUD)return;usherLogin(d.code);return}
+  if(id==='uf'){if(!ADMIN)return;if(USHERS.length>=10)return toast('Hanggang 10 ushers lang');const c=newCode(),n=String(d.name).trim();db.doc('ushers/'+c).set({name:n,active:true,at:Date.now()}).then(()=>toast('Usher code ni '+n+': '+c)).catch(er=>toast(er.message));e.target.reset();return}
   if(id==='stf'){if(!ME)return;stPost(ME,d);return meEnd(d.vis==='priv'?'Naipadala sa admin at pastor. Ipapanalangin ka namin!':'Na-post na. Ipapanalangin ka ng church family!')}
   if(id==='lgf'){const b=e.target.querySelector('button');b.disabled=true;b.textContent='Nagla-login…';auth.signInWithEmailAndPassword(String(d.em).trim(),d.pw).then(()=>{location.hash='dashboard'}).catch(er=>{b.disabled=false;b.textContent='Login';toast(/password|credential/i.test(er.code||'')?'Mali ang email o password':er.message)});return}
   if(id==='sf'){const p=D.people.find(x=>x.id===ME);if(!p)return meEnd();const ch={};Object.keys(FL).forEach(k=>{const v=String(d[k]??'').trim();if(v!==(p[k]||''))ch[k]=v});
